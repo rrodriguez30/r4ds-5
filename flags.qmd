@@ -1,5 +1,5 @@
 ---
-title: "Country Flags"
+title: "Country Flag Similarity"
 format: html
 execute:
   echo: false
@@ -7,45 +7,123 @@ execute:
 
 ```{r}
 #| message: false
-# Get all flag codes from the data directory
-flag_files <- list.files("data", pattern = "\\.png$")
-codes <- tools::file_path_sans_ext(flag_files)
+library(png)
 
-# Pass the codes to Observable JS
-ojs_define(flag_codes = codes)
+# 1. Load or compute pairwise distances
+if (!file.exists("data/flag_distances.rds")) {
+  flag_files <- list.files("data", pattern = "\\.png$", full.names = TRUE)
+  codes <- tools::file_path_sans_ext(basename(flag_files))
+  
+  target_h <- 20
+  target_w <- 30
+  img_matrix <- matrix(0, nrow = length(flag_files), ncol = target_h * target_w * 3)
+  
+  for (i in seq_along(flag_files)) {
+    img <- readPNG(flag_files[i])
+    if (dim(img)[3] >= 3) {
+      img_rgb <- img[,,1:3, drop = FALSE]
+    } else {
+      img_rgb <- array(img, dim = c(nrow(img), ncol(img), 3))
+    }
+    h_idx <- round(seq(1, nrow(img_rgb), length.out = target_h))
+    w_idx <- round(seq(1, ncol(img_rgb), length.out = target_w))
+    img_matrix[i, ] <- as.vector(img_rgb[h_idx, w_idx, , drop = FALSE])
+  }
+  
+  dists <- as.matrix(dist(img_matrix))
+  rownames(dists) <- codes
+  colnames(dists) <- codes
+  saveRDS(dists, "data/flag_distances.rds")
+} else {
+  dists <- readRDS("data/flag_distances.rds")
+}
+
+codes <- rownames(dists)
+
+# 2. Extract top 3 most and least similar flags for each country
+most_least <- lapply(codes, function(cd) {
+  row <- dists[cd, ]
+  others <- row[names(row) != cd]
+  sorted <- sort(others)
+  data.frame(
+    country = cd,
+    type = c(rep("Most Similar", 3), rep("Least Similar", 3)),
+    rank = c(1, 2, 3, 1, 2, 3),
+    match = c(names(head(sorted, 3)), rev(names(tail(sorted, 3)))),
+    stringsAsFactors = FALSE
+  )
+})
+similarity_df <- do.call(rbind, most_least)
+
+# 3. Pass data to Observable JS
+ojs_define(similarity_data = similarity_df, flag_codes = codes)
 ```
 
 ```{ojs}
 //| echo: false
-// Format country codes into readable names using the built-in Intl API
+// Format country codes into readable names using the browser's Intl API
 regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
 
-countries = flag_codes.map(code => {
-  let name;
+function getCountryName(code) {
   try {
-    name = regionNames.of(code.toUpperCase()) || code.toUpperCase();
+    return regionNames.of(code.toUpperCase()) || code.toUpperCase();
   } catch (e) {
-    name = code.toUpperCase();
+    return code.toUpperCase();
   }
-  return { code: code, name: name };
-}).sort((a, b) => a.name.localeCompare(b.name));
+}
 
-// Dropdown input to select a country
-viewof selected = Inputs.select(countries, {
-  label: "Select a Country:",
+countries = flag_codes.map(code => ({
+  code: code,
+  name: getCountryName(code)
+})).sort((a, b) => a.name.localeCompare(b.name));
+
+simRecords = transpose(similarity_data);
+```
+
+```{ojs}
+//| echo: false
+viewof selectedCountry = Inputs.select(countries, {
+  label: "Select Country:",
   format: d => d.name,
   value: countries.find(d => d.code === "us") || countries[0]
 });
 
-// Display the selected country's flag
+viewof mode = Inputs.radio(["Most Similar", "Least Similar"], {
+  label: "Show flags that are:",
+  value: "Most Similar"
+});
+```
+
+```{ojs}
+//| echo: false
+matches = simRecords.filter(d => d.country === selectedCountry.code && d.type === mode);
+
 html`
-<div style="margin-top: 20px;">
-  <h3>${selected.name}</h3>
-  <img 
-    src="data/${selected.code}.png" 
-    alt="Flag of ${selected.name}" 
-    style="max-width: 600px; width: 100%; height: auto; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);" 
-  />
+<div style="font-family: sans-serif; margin-top: 25px;">
+  <div style="margin-bottom: 30px;">
+    <h4>Selected Flag: ${selectedCountry.name}</h4>
+    <img 
+      src="data/${selectedCountry.code}.png" 
+      alt="${selectedCountry.name} flag" 
+      style="width: 260px; height: 160px; object-fit: cover; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);"
+    />
+  </div>
+
+  <h4>3 ${mode} Flags</h4>
+  <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+    ${matches.map(m => `
+      <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; width: 220px; background: #fafafa; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center;">
+        <div style="font-weight: 600; font-size: 0.9em; margin-bottom: 8px; color: #444;">
+          #${m.rank}: ${getCountryName(m.match)}
+        </div>
+        <img 
+          src="data/${m.match}.png" 
+          alt="${getCountryName(m.match)} flag" 
+          style="width: 100%; height: 120px; object-fit: cover; border: 1px solid #ddd; border-radius: 4px;"
+        />
+      </div>
+    `).join("")}
+  </div>
 </div>
 `
 ```
