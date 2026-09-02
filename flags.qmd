@@ -1,0 +1,51 @@
+---
+title: "Country Flags"
+format: html
+execute:
+  echo: false
+---
+
+```{r}
+#| message: false
+# Get all flag codes from the data directory
+flag_files <- list.files("data", pattern = "\\.png$")
+codes <- tools::file_path_sans_ext(flag_files)
+
+# Pass the codes to Observable JS
+ojs_define(flag_codes = codes)
+```
+
+```{ojs}
+//| echo: false
+// Format country codes into readable names using the built-in Intl API
+regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
+
+countries = flag_codes.map(code => {
+  let name;
+  try {
+    name = regionNames.of(code.toUpperCase()) || code.toUpperCase();
+  } catch (e) {
+    name = code.toUpperCase();
+  }
+  return { code: code, name: name };
+}).sort((a, b) => a.name.localeCompare(b.name));
+
+// Dropdown input to select a country
+viewof selected = Inputs.select(countries, {
+  label: "Select a Country:",
+  format: d => d.name,
+  value: countries.find(d => d.code === "us") || countries[0]
+});
+
+// Display the selected country's flag
+html`
+<div style="margin-top: 20px;">
+  <h3>${selected.name}</h3>
+  <img 
+    src="data/${selected.code}.png" 
+    alt="Flag of ${selected.name}" 
+    style="max-width: 600px; width: 100%; height: auto; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);" 
+  />
+</div>
+`
+```
