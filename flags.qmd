@@ -1,15 +1,19 @@
 ---
-title: "Country Flag Similarity"
-format: html
+title: "Flag Doppelgängers & Visual Explorer"
+format: 
+  html:
+    theme: cosmo
+    toc: false
 execute:
   echo: false
 ---
 
 ```{r}
 #| message: false
+#| warning: false
 library(png)
 
-# 1. Load or compute pairwise distances
+# 1. Load precomputed distances or compute if missing
 if (!file.exists("data/flag_distances.rds")) {
   flag_files <- list.files("data", pattern = "\\.png$", full.names = TRUE)
   codes <- tools::file_path_sans_ext(basename(flag_files))
@@ -40,23 +44,42 @@ if (!file.exists("data/flag_distances.rds")) {
 
 codes <- rownames(dists)
 
-# 2. Extract top 3 most and least similar flags for each country
+# 2. Extract top 15 most and least similar flags for each country
 most_least <- lapply(codes, function(cd) {
   row <- dists[cd, ]
   others <- row[names(row) != cd]
   sorted <- sort(others)
+  n_take <- min(15, length(sorted))
+  
   data.frame(
     country = cd,
-    type = c(rep("Most Similar", 3), rep("Least Similar", 3)),
-    rank = c(1, 2, 3, 1, 2, 3),
-    match = c(names(head(sorted, 3)), rev(names(tail(sorted, 3)))),
+    type = c(rep("Most Similar", n_take), rep("Least Similar", n_take)),
+    rank = c(seq_len(n_take), seq_len(n_take)),
+    match = c(names(head(sorted, n_take)), rev(names(tail(sorted, n_take)))),
+    distance = round(c(head(sorted, n_take), rev(tail(sorted, n_take))), 2),
     stringsAsFactors = FALSE
   )
 })
 similarity_df <- do.call(rbind, most_least)
 
-# 3. Pass data to Observable JS
-ojs_define(similarity_data = similarity_df, flag_codes = codes)
+# 3. Uniqueness score: average distance to top 3 nearest flags
+uniqueness_scores <- apply(dists, 1, function(row) {
+  mean(sort(row[row > 0])[1:3])
+})
+
+stats_df <- data.frame(
+  code = codes,
+  uniqueness_score = round(uniqueness_scores, 1),
+  uniqueness_rank = as.integer(rank(-uniqueness_scores)),
+  closest_match = sapply(codes, function(cd) {
+    row <- dists[cd, ]
+    names(sort(row[row > 0]))[1]
+  }),
+  stringsAsFactors = FALSE
+)
+
+# 4. Pass data to Observable JS
+ojs_define(similarity_data = similarity_df, flag_stats = stats_df, flag_codes = codes)
 ```
 
 ```{ojs}
@@ -65,6 +88,7 @@ ojs_define(similarity_data = similarity_df, flag_codes = codes)
 regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
 
 function getCountryName(code) {
+  if (!code) return "";
   try {
     return regionNames.of(code.toUpperCase()) || code.toUpperCase();
   } catch (e) {
@@ -77,53 +101,338 @@ countries = flag_codes.map(code => ({
   name: getCountryName(code)
 })).sort((a, b) => a.name.localeCompare(b.name));
 
+countryMap = new Map(countries.map(d => [d.name, d.code]));
 simRecords = transpose(similarity_data);
+statsMap = new Map(transpose(flag_stats).map(d => [d.code, d]));
+
+function changeCountry(code) {
+  const selectElem = document.querySelector("#explorer-controls select");
+  if (selectElem) {
+    selectElem.value = code;
+    selectElem.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+}
+```
+
+::: {.panel-tabset}
+
+## 🔍 Flag Explorer & Doppelgängers
+
+```{ojs}
+//| echo: false
+html`<div id="explorer-controls" style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin-bottom: 20px;"></div>`
 ```
 
 ```{ojs}
 //| echo: false
-viewof selectedCountry = Inputs.select(countries, {
+viewof selectedCode = Inputs.select(countryMap, {
   label: "Select Country:",
-  format: d => d.name,
-  value: countries.find(d => d.code === "us") || countries[0]
+  value: "us"
 });
 
 viewof mode = Inputs.radio(["Most Similar", "Least Similar"], {
-  label: "Show flags that are:",
+  label: "Comparison:",
   value: "Most Similar"
+});
+
+viewof topN = Inputs.range([1, 10], {
+  label: "How many flags to show:",
+  step: 1,
+  value: 3
 });
 ```
 
 ```{ojs}
 //| echo: false
-matches = simRecords.filter(d => d.country === selectedCountry.code && d.type === mode);
+selectedName = getCountryName(selectedCode);
+currentStats = statsMap.get(selectedCode) || { uniqueness_rank: "-", uniqueness_score: "-" };
+matches = simRecords
+  .filter(d => d.country === selectedCode && d.type === mode)
+  .slice(0, topN);
+
+// Calculate match percentage (distance 0 = 100%, distance >= 40 = 0%)
+function getMatchPct(dist) {
+  return Math.max(0, Math.min(100, Math.round(100 - (dist / 40) * 100)));
+}
 
 html`
-<div style="font-family: sans-serif; margin-top: 25px;">
-  <div style="margin-bottom: 30px;">
-    <h4>Selected Flag: ${selectedCountry.name}</h4>
-    <img 
-      src="data/${selectedCountry.code}.png" 
-      alt="${selectedCountry.name} flag" 
-      style="width: 260px; height: 160px; object-fit: cover; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);"
-    />
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  
+  <!-- Main Flag Showcase Card -->
+  <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 22px; margin-bottom: 25px; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.06); display: flex; flex-wrap: wrap; gap: 25px; align-items: center;">
+    <div>
+      <img 
+        src="data/${selectedCode}.png"
+        onerror="this.src='https://flagcdn.com/w640/${selectedCode}.png'"
+        alt="${selectedName} flag" 
+        style="width: 280px; height: 175px; object-fit: contain; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.08); display: block;"
+      />
+    </div>
+    
+    <div style="flex: 1; min-width: 240px;">
+      <div style="font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; font-weight: 700;">Selected Flag</div>
+      <h2 style="margin: 4px 0 12px 0; color: #0f172a;">${selectedName}</h2>
+      
+      <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-top: 10px;">
+        <div style="background: #f1f5f9; padding: 10px 14px; border-radius: 8px; border-left: 4px solid #3b82f6;">
+          <div style="font-size: 0.75rem; color: #64748b; font-weight: 600;">WORLD UNIQUENESS</div>
+          <div style="font-size: 1.1rem; font-weight: 700; color: #1e293b;">#${currentStats.uniqueness_rank} <span style="font-size: 0.8rem; font-weight: normal; color: #64748b;">/ 254</span></div>
+        </div>
+
+        <div style="background: #f1f5f9; padding: 10px 14px; border-radius: 8px; border-left: 4px solid #10b981;">
+          <div style="font-size: 0.75rem; color: #64748b; font-weight: 600;">CLOSEST TWIN</div>
+          <div style="font-size: 1.1rem; font-weight: 700; color: #1e293b;">${getCountryName(currentStats.closest_match)}</div>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <h4>3 ${mode} Flags</h4>
-  <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+  <!-- Comparison Results -->
+  <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px;">
+    <h4 style="color: #0f172a; margin: 0;">${topN} ${mode} Flags</h4>
+    <span style="font-size: 0.85rem; color: #64748b;">💡 Click any card to switch to that flag</span>
+  </div>
+  
+  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 18px;">
     ${matches.map(m => `
-      <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; width: 220px; background: #fafafa; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center;">
-        <div style="font-weight: 600; font-size: 0.9em; margin-bottom: 8px; color: #444;">
+      <div 
+        onclick="(${changeCountry.toString()})('${m.match}')"
+        title="Click to select ${getCountryName(m.match)}"
+        style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px; box-shadow: 0 2px 4px rgba(0,0,0,0.04); text-align: center; cursor: pointer; transition: transform 0.15s ease, box-shadow 0.15s ease;"
+        onmouseover="this.style.transform='translateY(-4px)'; this.style.boxShadow='0 8px 16px rgba(0,0,0,0.1)';"
+        onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 4px rgba(0,0,0,0.04)';"
+      >
+        <div style="font-weight: 700; font-size: 0.95rem; color: #1e293b; margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
           #${m.rank}: ${getCountryName(m.match)}
         </div>
         <img 
-          src="data/${m.match}.png" 
+          src="data/${m.match}.png"
+          onerror="this.src='https://flagcdn.com/w640/${m.match}.png'"
           alt="${getCountryName(m.match)} flag" 
-          style="width: 100%; height: 120px; object-fit: cover; border: 1px solid #ddd; border-radius: 4px;"
+          style="width: 100%; height: 115px; object-fit: contain; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 4px; display: block; margin: 0 auto;"
         />
+        <div style="margin-top: 10px;">
+          <div style="font-size: 0.8rem; font-weight: 600; color: ${mode === 'Most Similar' ? '#059669' : '#dc2626'};">
+            ${mode === 'Most Similar' ? `${getMatchPct(m.distance)}% Match` : `Distance: ${m.distance}`}
+          </div>
+        </div>
       </div>
     `).join("")}
   </div>
 </div>
 `
 ```
+
+## 🏆 World Records: Unique vs Common
+
+```{ojs}
+//| echo: false
+uniqueList = transpose(flag_stats)
+  .sort((a, b) => a.uniqueness_rank - b.uniqueness_rank);
+
+top5Unique = uniqueList.slice(0, 5);
+top5Common = uniqueList.slice(-5).reverse();
+
+html`
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <p style="color: #64748b; font-size: 0.95rem;">
+    Visual uniqueness measures how far each flag is from its 3 closest lookalikes in pixel RGB space.
+  </p>
+
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px;">
+    
+    <!-- Unique Flags Column -->
+    <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+      <h4 style="color: #0284c7; margin-top: 0; display: flex; align-items: center; gap: 8px;">
+        🦄 Top 5 Most Unique Flags
+      </h4>
+      <p style="font-size: 0.85rem; color: #64748b;">Hardest flags in the world to find a lookalike for:</p>
+      
+      <div style="display: flex; flex-direction: column; gap: 12px;">
+        ${top5Unique.map(d => `
+          <div 
+            onclick="(${changeCountry.toString()})('${d.code}')"
+            style="display: flex; align-items: center; gap: 14px; padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; cursor: pointer; transition: background 0.15s;"
+            onmouseover="this.style.background='#e0f2fe';"
+            onmouseout="this.style.background='#f8fafc';"
+          >
+            <img 
+              src="data/${d.code}.png" 
+              onerror="this.src='https://flagcdn.com/w320/${d.code}.png'" 
+              style="width: 65px; height: 42px; object-fit: contain; border: 1px solid #cbd5e1; border-radius: 4px;"
+            />
+            <div style="flex: 1;">
+              <div style="font-weight: 700; font-size: 0.9rem; color: #0f172a;">#${d.uniqueness_rank} ${getCountryName(d.code)}</div>
+              <div style="font-size: 0.75rem; color: #64748b;">Uniqueness Score: ${d.uniqueness_score}</div>
+            </div>
+            <span style="font-size: 0.75rem; color: #0284c7; font-weight: 600;">Inspect →</span>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+
+    <!-- Common Flags Column -->
+    <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+      <h4 style="color: #ea580c; margin-top: 0; display: flex; align-items: center; gap: 8px;">
+        👯‍♀️ Top 5 Most "Copycat / Twin" Flags
+      </h4>
+      <p style="font-size: 0.85rem; color: #64748b;">Flags with almost identical visual twins:</p>
+      
+      <div style="display: flex; flex-direction: column; gap: 12px;">
+        ${top5Common.map(d => `
+          <div 
+            onclick="(${changeCountry.toString()})('${d.code}')"
+            style="display: flex; align-items: center; gap: 14px; padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; cursor: pointer; transition: background 0.15s;"
+            onmouseover="this.style.background='#ffedd5';"
+            onmouseout="this.style.background='#f8fafc';"
+          >
+            <img 
+              src="data/${d.code}.png" 
+              onerror="this.src='https://flagcdn.com/w320/${d.code}.png'" 
+              style="width: 65px; height: 42px; object-fit: contain; border: 1px solid #cbd5e1; border-radius: 4px;"
+            />
+            <div style="flex: 1;">
+              <div style="font-weight: 700; font-size: 0.9rem; color: #0f172a;">${getCountryName(d.code)}</div>
+              <div style="font-size: 0.75rem; color: #64748b;">Closest Twin: ${getCountryName(d.closest_match)}</div>
+            </div>
+            <span style="font-size: 0.75rem; color: #ea580c; font-weight: 600;">Inspect →</span>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+
+  </div>
+</div>
+`
+```
+
+## 🎮 Doppelgänger Quiz
+
+```{ojs}
+//| echo: false
+// Quiz Component State
+quizContainer = {
+  const container = html`<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 650px;"></div>`;
+  
+  let score = 0;
+  let streak = 0;
+  let answered = false;
+  
+  // Pool of interesting countries with clear twins
+  const challengePool = ["ro", "id", "us", "fr", "ie", "au", "cl", "co", "nl", "de", "sn", "eg", "jp"];
+
+  function nextQuestion() {
+    answered = false;
+    
+    // Pick random target
+    const targetCode = challengePool[Math.floor(Math.random() * challengePool.length)];
+    const targetName = getCountryName(targetCode);
+    const targetStats = statsMap.get(targetCode);
+    const correctCode = targetStats.closest_match;
+    const correctName = getCountryName(correctCode);
+
+    // Pick 3 random distractors
+    const distractors = [];
+    while (distractors.length < 3) {
+      const rand = flag_codes[Math.floor(Math.random() * flag_codes.length)];
+      if (rand !== targetCode && rand !== correctCode && !distractors.includes(rand)) {
+        distractors.push(rand);
+      }
+    }
+
+    const options = [correctCode, ...distractors].sort(() => Math.random() - 0.5);
+
+    container.innerHTML = `
+      <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; box-shadow: 0 4px 10px rgba(0,0,0,0.06);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <span style="font-weight: 700; color: #475569; font-size: 0.95rem;">Doppelgänger Challenge</span>
+          <div style="display: flex; gap: 10px;">
+            <span style="background: #e2e8f0; padding: 4px 10px; border-radius: 20px; font-weight: 700; font-size: 0.85rem; color: #334155;">Score: ${score}</span>
+            <span style="background: #fef3c7; padding: 4px 10px; border-radius: 20px; font-weight: 700; font-size: 0.85rem; color: #b45309;">🔥 Streak: ${streak}</span>
+          </div>
+        </div>
+
+        <p style="font-size: 1.05rem; margin-bottom: 12px; color: #0f172a;">
+          Which flag is the <strong>closest visual twin</strong> to <strong>${targetName}</strong>?
+        </p>
+
+        <div style="text-align: center; margin: 15px 0 25px 0;">
+          <img 
+            src="data/${targetCode}.png"
+            onerror="this.src='https://flagcdn.com/w640/${targetCode}.png'" 
+            style="width: 220px; height: 140px; object-fit: contain; border: 2px solid #3b82f6; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);"
+          />
+        </div>
+
+        <div id="options-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+          ${options.map(opt => `
+            <button 
+              data-code="${opt}"
+              class="quiz-btn"
+              style="display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px; border: 2px solid #e2e8f0; border-radius: 8px; background: #ffffff; cursor: pointer; transition: all 0.15s;"
+            >
+              <img 
+                src="data/${opt}.png" 
+                onerror="this.src='https://flagcdn.com/w320/${opt}.png'" 
+                style="width: 120px; height: 75px; object-fit: contain; border: 1px solid #cbd5e1; border-radius: 4px; pointer-events: none;"
+              />
+              <span style="font-weight: 600; font-size: 0.85rem; color: #1e293b; pointer-events: none;">${getCountryName(opt)}</span>
+            </button>
+          `).join("")}
+        </div>
+
+        <div id="feedback-area" style="margin-top: 18px; min-height: 40px; text-align: center;"></div>
+      </div>
+    `;
+
+    // Attach click listeners to options
+    container.querySelectorAll(".quiz-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        if (answered) return;
+        answered = true;
+        const chosen = btn.getAttribute("data-code");
+        const feedback = container.querySelector("#feedback-area");
+
+        if (chosen === correctCode) {
+          score += 10;
+          streak += 1;
+          btn.style.borderColor = "#10b981";
+          btn.style.background = "#ecfdf5";
+          feedback.innerHTML = `
+            <div style="color: #059669; font-weight: 700; font-size: 1.1rem; margin-bottom: 10px;">
+              🎉 Correct! ${correctName} is the closest match!
+            </div>
+            <button id="next-btn" class="btn btn-primary" style="padding: 8px 20px; font-weight: 600;">Next Flag ➔</button>
+          `;
+        } else {
+          streak = 0;
+          btn.style.borderColor = "#ef4444";
+          btn.style.background = "#fef2f2";
+          
+          // Highlight correct one
+          container.querySelectorAll(".quiz-btn").forEach(b => {
+            if (b.getAttribute("data-code") === correctCode) {
+              b.style.borderColor = "#10b981";
+              b.style.background = "#ecfdf5";
+            }
+          });
+
+          feedback.innerHTML = `
+            <div style="color: #dc2626; font-weight: 700; font-size: 1.05rem; margin-bottom: 10px;">
+              Not quite! The closest twin was ${correctName}.
+            </div>
+            <button id="next-btn" class="btn btn-secondary" style="padding: 8px 20px; font-weight: 600;">Try Another ➔</button>
+          `;
+        }
+
+        container.querySelector("#next-btn").addEventListener("click", nextQuestion);
+      });
+    });
+  }
+
+  nextQuestion();
+  return container;
+}
+```
+
+:::
