@@ -2,4 +2,246 @@
 title: "Wildfires and Movies"
 author: "rrodriguez30"
 format: html
+execute:
+  echo: false
 ---
+
+```{r}
+#| cache: true
+#| message: false
+library(tidyverse)
+library(purrr)
+library(leaflet)
+library(rvest)
+library(httr2)
+library(jsonlite)
+
+raw <- read_json("data/wildfires.geojson")
+length(raw$features)
+
+features <- tibble(features = raw$features)
+features
+
+features <- features |> unnest_wider(features)
+features
+
+features <- features |> unnest_wider(properties)
+features
+
+fires <- features |>
+  unnest_wider(geometry, names_sep = "_") |>
+  select(incident, gis_acres, fire_year, agency, state, geometry_coordinates) |>
+  mutate(
+    gis_acres = as.numeric(gis_acres),
+    fire_year = as.integer(fire_year)
+  )
+
+first_fire <- raw$features[[1]]
+names(first_fire)
+
+first_coordinate <- first_fire$geometry$coordinates[[1]][[1]]
+first_coordinate
+```
+
+```{r}
+august_fires <- fires |> dplyr::filter(stringr::str_detect(incident, "August"))
+nrow(august_fires)
+
+fires |> dplyr::arrange(desc(gis_acres)) |> dplyr::slice_head(n = 10)
+```
+
+```{r}
+fires |>
+  dplyr::group_by(fire_year) |>
+  dplyr::summarize(total_acres = sum(gis_acres, na.rm = TRUE)) |>
+  ggplot2::ggplot(ggplot2::aes(x = fire_year, y = total_acres)) +
+  ggplot2::geom_line() +
+  ggplot2::labs(
+    title = "Total Acres Burned per Year",
+    x = "Fire Year",
+    y = "Total Acres Burned",
+    caption = "Source: wildfire incident records"
+  )
+```
+
+```{r}
+big_fires <- fires |>
+  dplyr::filter(gis_acres >= 100000) |>
+  dplyr::mutate(
+    lon = purrr::map_dbl(geometry_coordinates, \(boundary) {
+      mean(purrr::map_dbl(boundary[[1]], \(pair) pair[[1]]))
+    }),
+    lat = purrr::map_dbl(geometry_coordinates, \(boundary) {
+      mean(purrr::map_dbl(boundary[[1]], \(pair) pair[[2]]))
+    })
+  )
+```
+
+```{r}
+big_fires |>
+  dplyr::count(agency) |>
+  ggplot2::ggplot(ggplot2::aes(x = reorder(agency, n), y = n)) +
+  ggplot2::geom_col() +
+  ggplot2::coord_flip() +
+  ggplot2::labs(
+    title = "Number of Big Fires by Managing Agency",
+    x = "Managing Agency",
+    y = "Number of Fires"
+  )
+```
+
+```{r}
+ten_fires <- big_fires |>
+  dplyr::arrange(desc(gis_acres)) |>
+  dplyr::slice_head(n = 10)
+
+boundary_coordinates <- purrr::map(
+  ten_fires$geometry_coordinates,
+  \(boundary) cbind(
+    purrr::map_dbl(boundary[[1]], \(pair) pair[[1]]),
+    purrr::map_dbl(boundary[[1]], \(pair) pair[[2]])
+  )
+)
+all_coordinates <- do.call(rbind, boundary_coordinates)
+
+fire_map <- leaflet::leaflet() |> leaflet::addTiles()
+for (i in seq_len(nrow(ten_fires))) {
+  fire <- ten_fires[i, ]
+  fire_map <- fire_map |>
+    leaflet::addPolygons(
+      lng = boundary_coordinates[[i]][, 1],
+      lat = boundary_coordinates[[i]][, 2],
+      popup = paste0(
+        "<strong>", fire$incident, "</strong><br>",
+        "Year: ", fire$fire_year, "<br>",
+        "Acres: ", format(fire$gis_acres, big.mark = ",")
+      )
+    )
+}
+
+fire_map |>
+  leaflet::fitBounds(
+    lng1 = min(all_coordinates[, 1]),
+    lat1 = min(all_coordinates[, 2]),
+    lng2 = max(all_coordinates[, 1]),
+    lat2 = max(all_coordinates[, 2])
+  )
+```
+
+```{r}
+imdb_snapshots <- readRDS("data/imdb_snapshots.rds")
+
+rank_changes <- imdb_snapshots |>
+  dplyr::filter(snap_year %in% c(2015, 2022)) |>
+  dplyr::mutate(release_decade = floor(year / 10) * 10) |>
+  dplyr::select(title, release_decade, snap_year, rank) |>
+  tidyr::pivot_wider(names_from = snap_year, values_from = rank, names_prefix = "rank_") |>
+  dplyr::filter(!is.na(rank_2015), !is.na(rank_2022)) |>
+  dplyr::mutate(
+    rank_change = rank_2022 - rank_2015,
+    absolute_change = abs(rank_change)
+  ) |>
+  dplyr::arrange(desc(absolute_change)) |>
+  dplyr::slice_head(n = 10) |>
+  dplyr::select(title, release_decade, rank_2015, rank_2022, rank_change)
+
+rank_changes
+
+rank_changes |>
+  dplyr::group_by(release_decade) |>
+  dplyr::summarize(average_rank_change = mean(rank_change, na.rm = TRUE)) |>
+  dplyr::arrange(release_decade)
+```
+
+```{r}
+nolan_films <- imdb_snapshots |>
+  dplyr::filter(title %in% c(
+    "The Dark Knight",
+    "Inception",
+    "Interstellar",
+    "The Dark Knight Rises",
+    "Memento",
+    "The Prestige",
+    "Batman Begins"
+  )) |>
+  dplyr::select(title, snap_year, rank) |>
+  tidyr::pivot_wider(names_from = snap_year, values_from = rank, names_prefix = "rank_")
+
+nolan_films
+```
+
+```{r}
+interstellar <- imdb_snapshots |>
+  dplyr::filter(title == "Interstellar")
+
+interstellar |>
+  ggplot2::ggplot(ggplot2::aes(x = factor(snap_year), y = rank)) +
+  ggplot2::geom_col() +
+  ggplot2::scale_y_reverse() +
+  ggplot2::labs(
+    title = "Interstellar IMDb Rank by Snapshot Year",
+    x = "Snapshot Year",
+    y = "IMDb Rank"
+  )
+```
+
+```{r}
+film_snapshot_counts <- imdb_snapshots |>
+  dplyr::count(title, name = "snapshot_count")
+
+film_snapshot_counts |>
+  dplyr::count(snapshot_count, name = "film_count")
+```
+
+```{r}
+#| cache: true
+snapshot_years <- c(2015, 2017, 2019, 2021, 2022)
+snapshot_urls <- c(
+  "https://web.archive.org/web/20150101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20170101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20190101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20210101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20220201012049/https://www.imdb.com/chart/top/"
+)
+
+scrape_snapshot <- \(address, snapshot_year) {
+  response <- httr2::request(address) |>
+    httr2::req_timeout(120) |>
+    httr2::req_retry(max_tries = 3) |>
+    httr2::req_perform()
+
+  page <- response |>
+    httr2::resp_body_string() |>
+    rvest::read_html()
+
+  table <- page |> rvest::html_table() |> purrr::pluck(1)
+  rating_tooltips <- page |>
+    rvest::html_elements(".ratingColumn.imdbRating [title]") |>
+    rvest::html_attr("title")
+
+  tibble::tibble(
+    raw_rank_title = table[[2]],
+    rating = as.numeric(table[[3]]),
+    tooltip = rating_tooltips
+  ) |>
+    tidyr::extract(
+      raw_rank_title,
+      into = c("rank", "title", "year"),
+      regex = "^\\s*(\\d+)\\.\\s+(.*)\\s+\\((\\d{4})\\)\\s*$",
+      convert = TRUE
+    ) |>
+    dplyr::transmute(
+      snap_year = snapshot_year,
+      rank,
+      title,
+      year,
+      rating,
+      number = readr::parse_number(
+        stringr::str_extract(tooltip, "[0-9,]+(?= votes)")
+      )
+    )
+}
+
+imdb_snapshots <- purrr::map2(snapshot_urls, snapshot_years, scrape_snapshot) |>
+  purrr::list_rbind()
+```
