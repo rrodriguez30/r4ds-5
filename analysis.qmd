@@ -140,17 +140,45 @@ rank_changes <- imdb_snapshots |>
   dplyr::mutate(
     rank_change = rank_2022 - rank_2015,
     absolute_change = abs(rank_change)
-  ) |>
+  )
+
+rank_changes |>
   dplyr::arrange(desc(absolute_change)) |>
   dplyr::slice_head(n = 10) |>
   dplyr::select(title, release_decade, rank_2015, rank_2022, rank_change)
 
-rank_changes
-
-rank_changes |>
+average_rank_changes <- rank_changes |>
   dplyr::group_by(release_decade) |>
   dplyr::summarize(average_rank_change = mean(rank_change, na.rm = TRUE)) |>
   dplyr::arrange(release_decade)
+
+average_rank_changes |>
+  dplyr::mutate(
+    direction = dplyr::if_else(
+      average_rank_change > 0,
+      "Rank rose",
+      "Rank fell"
+    )
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = average_rank_change,
+      y = factor(release_decade, levels = sort(unique(release_decade))),
+      fill = direction
+    )
+  ) +
+  ggplot2::geom_col(width = 0.7) +
+  ggplot2::geom_vline(xintercept = 0, color = "grey40") +
+  ggplot2::scale_fill_manual(values = c("Rank rose" = "#D55E00", "Rank fell" = "#0072B2")) +
+  ggplot2::labs(
+    title = "Average IMDb Rank Change by Release Decade",
+    subtitle = "Positive values indicate that films moved down the rankings",
+    x = "Average Rank Change (2022 rank - 2015 rank)",
+    y = "Release Decade",
+    fill = "Rank Direction",
+    caption = "Based on 190 films appearing in both the 2015 and 2022 snapshots."
+  ) +
+  ggplot2::theme_minimal()
 ```
 
 ```{r}
